@@ -1,20 +1,140 @@
 #!/usr/bin/zsh
 
-###     Paths
-filtering="Working Script.vpy"
-interlaced_filtering="Interlaced Working Script.vpy"
-temp="TemporaryFolder"
+###     Argument Parsing
+declare -a raw_paths
+while (( "$#" )); do
+  case "$1" in
+    --scenedetect|-s)
+      scenedetect="$2"
+      shift 2
+      ;;
+    --filtering|-f)
+      filtering="$2"
+      shift 2
+      ;;
+    --encode|-e)
+      encode="$2"
+      shift 2
+      ;;
+    --edit-scenedetect|-es)
+      edit_scenedetect="$2"
+      shift 2
+      ;;
+    --edit-filtering|-ef)
+      edit_filtering="$2"
+      shift 2
+      ;;
+    --edit-encode|-ee)
+      edit_encode="$2"
+      shift 2
+      ;;
+    --config|-c)
+      config="$2"
+      shift 2
+      ;;
+    --batch|-b)
+      batch="$2"
+      shift 2
+      ;;
+    --metric|-m)
+      metric="$2"
+      shift 2
+      ;;
+    --) # end argument parsing
+      shift
+      break
+      ;;
+    -*|--*=) # unsupported flags
+      echo "Error: Unsupported flag $1" >&2
+      exit 1
+      ;;
+    *) # preserve positional arguments
+      raw_paths+=("$1")
+      shift
+      ;;
+  esac
+done
 
-###     Find Video files, Begin Loop
-find $1 -type f \( -name "*.mkv" -o -name "*.mp4" \) -print0 | while IFS= read -r -d '' video_path; do
+eval set -- "${raw_paths[@]}"
+
+###     Paths
+if [ grep -q "###     Default Temporary Folder" ".vast.conf" ];then
+    temp=$(awk -v sds="###     Default Temporary Folder" '
+        $0 == sds {found=1; next}
+        found && /^$/ {exit}
+        found {print}
+    ' vast.conf)
+else
+    echo "Error: Temporary Folder not found in Config"
+    exit 1
+fi
+
+if [ $batch == 1 ]; then
+    batch_options=$(awk -v sds="###     Batch Options" '
+        $0 == sds {found=1; next}
+        found && /^$/ {exit}
+        found {print}
+    ' vast.conf)
+elif [ $batch == 0 ]; then  #Does unset evaluate to 0? Might need to revise
+    true
+else
+    echo "Error: Unsupported batch flag"
+    exit 1
+fi
+
+if [ -z $scenedetect ]; then
+    scenedetect_script=$(awk -v sds="###     Default Scenedetect Script" '
+        $0 == sds {found=1; next}
+        found && /^$/ {exit}
+        found {print}
+    ' vast.conf)
+elif [ grep -q "$scenedetect" ".vast.conf" ];then
+    scenedetect_script=$(awk -v sds="###     $scenedetect" '
+        $0 == sds {found=1; next}
+        found && /^$/ {exit}
+        found {print}
+    ' vast.conf)
+else
+    echo "Error: Encode preset '$scenedetect' not found in vast.conf."
+    exit 1
+fi
+
+if [ -z $filtering ]; then
+    filtering_script=$(awk -v sds="###     Default Filtering Script" '
+        $0 == sds {found=1; next}
+        found && /^$/ {exit}
+        found {print}
+    ' vast.conf)
+elif [ grep -q "$filtering" ".vast.conf" ];then
+    filtering_script=$(awk -v sds="###     $filtering" '
+        $0 == sds {found=1; next}
+        found && /^$/ {exit}
+        found {print}
+    ' vast.conf)
+else
+    echo "Error: Encode preset '$filtering' not found in vast.conf."
+    exit 1
+fi
 
 ###     File Handling
+declare -a video_files
+for arg in "$@"; do
+    if [[ -d "$arg" ]]; then
+        while IFS= read -r -d '' file; do
+            video_files+=("$file")
+        done < <(find "$arg" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.webm" -o -name "*.avi" -o -name "*.mov" -o -name "*.mpg" -o -name "*.mpeg" -o -name "*.mts" -o -name "*.m2ts" -o -name "*.mxf" -o -name "*.wmv" \) -print0)
+    elif [[ -f "$arg" ]]; then
+        video_files+=("$arg")
+    fi
+done
+
+for video_path in "${video_files[@]}"; do
 working_directory="${video_path%/*}"
 filename="${video_path##*/}"
 extension="${filename##*.}"
 noextension="${filename%.*}"
 tempname="${noextension}.mkv"
-problem=false
+batch_counter=1
 
 ###     Skip if already encoded
 if [[ "$filename" == *-encoded.* ]]; then
@@ -26,50 +146,77 @@ if [ -f "$working_directory/$noextension-encoded.mkv" ] || [ -f "$working_direct
     continue
 fi
 
-###     Temporary folder for scenes file/filtering
+###     Temporary folder for scenes file
 mkdir $temp
 
-###     Determine interlacing
-interlacing=$(ffprobe -v quiet -select_streams v -show_entries stream=field_order -of csv=p=0 "$video_path")
+###     Replace source in scenedetect .vpy
+sed -i "5c source = r'''$(realpath "$video_path")'''" "$scenedetect_script"
 
-if [ "$interlacing" = "tb" ]; then
-    ###     Replace source in filtering .vpy
-    sed -i "11c source = r'''$(realpath "$video_path")'''" "$interlaced_filtering"
+###     Create scenes file for scenedetect skipping
+konsole -e av1an -i $scenedetect_script -e vpx \
+    -a " -an " -w 16 \
+    -f " -sn -dn " \
+    --sc-downscale-height 720 \
+    --sc-only -s $temp/scenes-$filename.txt \
+    -o "lol.mkv"
 
-    ###     Filter Video
-    vspipe "$interlaced_filtering" -c y4m - | ffmpeg -nostdin -i - -vcodec libx264 -preset faster -qp 0 "$temp/$noextension-filtered.mkv"
+###     Replace source in filtering .vpy
+sed -i "11c source = r'''$(realpath "$video_path")'''" "$filtering_script"
 
-elif [ "$interlacing" = "progressive" ]; then
-    ###     Replace source in filtering .vpy
-    sed -i "11c source = r'''$(realpath "$video_path")'''" "$filtering"
+###     Batch Encoding, comment out for individual videos or multiple videos with the same parameters
+for parameters in ${batch_options[@]}; do
 
-    ###     Filter Video
-    vspipe "$filtering" -c y4m - | ffmpeg -nostdin -i - -vcodec libx264 -preset faster -qp 0 "$temp/$noextension-filtered.mkv"
+### This will create a unique filename for each pass, "video-1.mkv", "video-2.mkv", etc.
+increment="${noextension}-${batch_counter}.${extension}" ### Replace Extension
 
-else
-    problem=true
+###     Handle Scenedetect switching
+with_sds=$(cat <<'EOF'
+    -s "$temp"scenes-$filename.txt \
+    -i "$filtering_script" \
+    -o "$temp$increment"
+EOF
+)
+
+without_sds=$(cat <<'EOF'
+    -i "$video_path" \
+    -o "$temp$increment"
+EOF
+)
+
+###     Get Encoder Preset
+if [ -n "$encode" ]; then
+    command_to_run=$(awk -v preset="###     $encode" '
+        $0 == preset {found=1; next}
+        found && /^$/ {exit}
+        found {print}
+    ' vast.conf)
+    if [ -z "$command_to_run" ]; then
+        echo "Error: Encode preset '$encode' not found in vast.conf."
+        exit 1
+    fi
+    if [ $scenedetect == 1 ]; then
+        eval "$command_to_run$with_sds"
+    elif [ $scenedetect == 0 ]; then
+        eval "$command_to_run$without_sds"
+    else
+        echo "Error: Unsupported scenedetect flag"
+        exit 1
+    fi
 fi
 
-if  [ "$problem" = false ]; then
-###     Encode Video
-av1an -e svt-av1 -v " --crf 17 --preset 2 --tune 3 --noise-norm-strength 3 --lp 12" \
-    -m bestsource --verbose --force -w 16 --set-thread-affinity 8 -c mkvmerge \
-    -i "$temp/$noextension-filtered.mkv" \
-    -o "$temp/$noextension-encoded.mkv"
-
 ###     Run FFVship to create Metric JSONs and Graphs
-FFVship -s "$temp/$noextension-encoded.mkv" -e "$temp/$noextension-filtered.mkv" -m Butteraugli --json "$temp/$noextension-butter.json"
+FFVship -s "$temp/$noextension-filtered.mkv" -e "$temp/$noextension-encoded.mkv" -m Butteraugli --json "$temp/$noextension-butter.json"
 python plot_butter.py "$temp/$noextension-butter.json" "$working_directory/$noextension-butter.png"
-FFVship -s "$temp/$noextension-encoded.mkv" -e "$temp/$noextension-filtered.mkv" --json "$temp/$noextension-ssimu2.json"
+FFVship -s "$temp/$noextension-filtered.mkv" -e "$temp/$noextension-encoded.mkv" --json "$temp/$noextension-ssimu2.json"
 python plot_ssimu2.py "$temp/$noextension-ssimu2.json" "$working_directory/$noextension-ssimu2.png"
 
 ###     Mux audio from source video with encoded video
-ffmpeg -an -i "$temp/$noextension-encoded.mkv" -vn -i "$video_path" \
+konsole -e ffmpeg -an -i "$temp$increment" -vn -i "$video_path" \
     -c:v copy -c:a copy \
-    "$working_directory/$noextension-encoded.mkv"
+    "$working_directory/$increment"
 
-else
-fi
+    let batch_counter=batch_counter+1
+done
 
 ###     Remove temporary folder
 rm -rf $temp
