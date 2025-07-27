@@ -4,19 +4,19 @@
 declare -a raw_paths
 while (( "$#" )); do
   case "$1" in
-    --scenedetect|-s)
-      scenedetect="$2"
-      shift 2
-      ;;
     --filtering|-f)
       filtering="$2"
+      shift 2
+      ;;
+    --filtering-preset|-fp)
+      filtering_preset="$2"
       shift 2
       ;;
     --encode|-e)
       encode="$2"
       shift 2
       ;;
-    --edit-scenedetect|-es)
+    --edit-scenedetect|-es) #handle these three somehow
       edit_scenedetect="$2"
       shift 2
       ;;
@@ -28,6 +28,10 @@ while (( "$#" )); do
       edit_encode="$2"
       shift 2
       ;;
+    --audio|-a)
+      audio="$2"
+      shift 2
+      ;;
     --config|-c)
       config="$2"
       shift 2
@@ -36,8 +40,8 @@ while (( "$#" )); do
       batch="$2"
       shift 2
       ;;
-    --metric|-m)
-      metric="$2"
+    --metrics|-m)
+      metrics="$2"
       shift 2
       ;;
     --) # end argument parsing
@@ -57,64 +61,47 @@ done
 
 eval set -- "${raw_paths[@]}"
 
-###     Paths
-if [ grep -q "###     Default Temporary Folder" ".vast.conf" ];then
-    temp=$(awk -v sds="###     Default Temporary Folder" '
-        $0 == sds {found=1; next}
-        found && /^$/ {exit}
-        found {print}
-    ' vast.conf)
-else
-    echo "Error: Temporary Folder not found in Config"
-    exit 1
-fi
+###     Paths/Prest extraction   - Rewrite for Bash compat maybe?
+typeset -A config_variables=(
+    temporary_folder "Default Temporary Folder"
+    scenedetect_path "Default Scenedetect Script"
+    interlaced_sd_path "Default Interlaced Scenedetect Script"
+    batch_options "Batch Options"
+    audio_option "Use Audio Default"
+    filtering_option "Filtering Default"
+    metric_option "Use Metrics Default"
+    filtering_path "Default Filtering Script"
+    encode_option "Default Encode Option"
+)
 
-if [ $batch == 1 ]; then
-    batch_options=$(awk -v sds="###     Batch Options" '
-        $0 == sds {found=1; next}
-        found && /^$/ {exit}
-        found {print}
-    ' vast.conf)
-elif [ $batch == 0 ]; then  #Does unset evaluate to 0? Might need to revise
-    true
-else
-    echo "Error: Unsupported batch flag"
-    exit 1
-fi
+if [[ -v audio ]]; typeset -A config_variables=( audio_option "$audio" ); fi
+if [[ -v filtering ]]; typeset -A config_variables=( filtering_option "$filtering" ); fi
+if [[ -v metrics ]]; typeset -A config_variables=( metric_option "$metrics" ); fi
+if [[ -v filtering_preset ]]; typeset -A config_variables=( filtering_path "$filtering_preset" ); fi
+if [[ -v encode ]]; typeset -A config_variables=( encode_option "$encode" ); fi
 
-if [ -z $scenedetect ]; then
-    scenedetect_script=$(awk -v sds="###     Default Scenedetect Script" '
-        $0 == sds {found=1; next}
-        found && /^$/ {exit}
-        found {print}
-    ' vast.conf)
-elif [ grep -q "$scenedetect" ".vast.conf" ];then
-    scenedetect_script=$(awk -v sds="###     $scenedetect" '
-        $0 == sds {found=1; next}
-        found && /^$/ {exit}
-        found {print}
-    ' vast.conf)
-else
-    echo "Error: Encode preset '$scenedetect' not found in vast.conf."
-    exit 1
-fi
+awk_parse_config='
+$0 == sds {found=1; next}
+found && /^$/ {exit}
+found {print}
+'
 
-if [ -z $filtering ]; then
-    filtering_script=$(awk -v sds="###     Default Filtering Script" '
-        $0 == sds {found=1; next}
-        found && /^$/ {exit}
-        found {print}
-    ' vast.conf)
-elif [ grep -q "$filtering" ".vast.conf" ];then
-    filtering_script=$(awk -v sds="###     $filtering" '
-        $0 == sds {found=1; next}
-        found && /^$/ {exit}
-        found {print}
-    ' vast.conf)
-else
-    echo "Error: Encode preset '$filtering' not found in vast.conf."
-    exit 1
-fi
+for key ("${(@k)config_variables}"); do
+  if [ grep -q "###     $config_variables[$key]" ".vast.conf" ];then
+    inbetween=$(awk -v sds="###     $config_variables[$key]" "$awk_parse_config" vast.conf)
+    eval $key="$inbetween"
+  fi
+done;
+
+if [[ -z temporary_folder ]];   print_and_exit "Error: Temporary Folder not found in Config"; fi
+if [[ -z scenedetect_path ]]; print_and_exit "Error: Scenedetect preset '$config_variables[scenedetect_path]' not found in config."; fi
+if [[ -z interlaced_sd_path ]]; print_and_exit "Error: Scenedetect preset '$config_variables[interlaced_sd_path]' not found in config."; fi
+if [[ -z batch_options ]];   print_and_exit "Error: Batch Options not found in Config"; fi
+if [[ -z audio_option ]]; print_and_exit "Error: Audio option '$config_variables[audio_option]' not found in config."; fi
+if [[ -z filtering_option ]]; print_and_exit "Error: Scenedetect option '$config_variables[filtering_option]' not found in config."; fi
+if [[ -z metric_option ]]; print_and_exit "Error: Metrics option '$config_variables[metric_option]' not found in config."; fi
+if [[ -z filtering_path ]];   print_and_exit "Error: Filter preset '$config_variables[filtering_path]' not found in config."; fi
+if [[ -z encode_option ]]; print_and_exit "Error: Encode option '$config_variables[encode_option]' not found in config."; fi
 
 ###     File Handling
 declare -a video_files
@@ -136,6 +123,7 @@ noextension="${filename%.*}"
 tempname="${noextension}.mkv"
 batch_counter=1
 
+#       Redo, non-functional atm
 ###     Skip if already encoded
 if [[ "$filename" == *-encoded.* ]]; then
     echo "Skipping already encoded file: $filename"
@@ -146,77 +134,121 @@ if [ -f "$working_directory/$noextension-encoded.mkv" ] || [ -f "$working_direct
     continue
 fi
 
-###     Temporary folder for scenes file
+###     Determine interlacing
+interlacing=$(ffprobe -v quiet -select_streams v -show_entries stream=field_order -of csv=p=0 "$video_path")
+
+if [[ "$interlacing" != "progressive" && "$interlacing" != "tb" ]]; then
+    echo "* Unknown interlacing type encountered: $filename"
+    echo "* Interlacing type: $interlacing"
+    continue
+fi
+
+###     Create Temporary Working Folder
 mkdir $temp
 
-###     Replace source in scenedetect .vpy
-sed -i "5c source = r'''$(realpath "$video_path")'''" "$scenedetect_script"
+function batch_conditional {
 
+if [[ $filtering_option == "2" ]]; then
+###     Replace source in scenedetect .vpy
+export VAST_VIDEO_PATH=$(realpath "$video_path")
+
+#       Possible alternative to Av1an?
 ###     Create scenes file for scenedetect skipping
-konsole -e av1an -i $scenedetect_script -e vpx \
-    -a " -an " -w 16 \
-    -f " -sn -dn " \
-    --sc-downscale-height 720 \
-    --sc-only -s $temp/scenes-$filename.txt \
-    -o "lol.mkv"
+    if [[ "$interlacing" == "tb" ]]; then
+        av1an -i $interlaced_sd_path -e vpx \
+            -a " -an " -w 16 \
+            -f " -sn -dn " \
+            --sc-downscale-height 720 \
+            --sc-only -s $temp/scenes-$filename.txt \
+            -o "lol.mkv"
+    else
+        av1an -i $scenedetect_path -e vpx \
+            -a " -an " -w 16 \
+            -f " -sn -dn " \
+            --sc-downscale-height 720 \
+            --sc-only -s $temp/scenes-$filename.txt \
+            -o "lol.mkv"
+    fi
+
+unset VAST_VIDEO_PATH
+fi
 
 ###     Replace source in filtering .vpy
-sed -i "11c source = r'''$(realpath "$video_path")'''" "$filtering_script"
+export VAST_VIDEO_PATH=$(realpath "$video_path")
 
-###     Batch Encoding, comment out for individual videos or multiple videos with the same parameters
-for parameters in ${batch_options[@]}; do
-
-### This will create a unique filename for each pass, "video-1.mkv", "video-2.mkv", etc.
+###     Create unique filenames
 increment="${noextension}-${batch_counter}.${extension}" ### Replace Extension
 
-###     Handle Scenedetect switching
-with_sds=$(cat <<'EOF'
+###     Handle Scenedetect/Filtering switching
+with_sds_filtering=$(cat <<'EOF'
     -s "$temp"scenes-$filename.txt \
-    -i "$filtering_script" \
+    -i "$filtering_path" \
     -o "$temp$increment"
 EOF
 )
 
-without_sds=$(cat <<'EOF'
+with_filtering=$(cat <<'EOF'
+    -i "$filtering_path" \
+    -o "$temp$increment"
+EOF
+)
+
+without_sds_filtering=$(cat <<'EOF'
     -i "$video_path" \
     -o "$temp$increment"
 EOF
 )
 
 ###     Get Encoder Preset
-if [ -n "$encode" ]; then
-    command_to_run=$(awk -v preset="###     $encode" '
-        $0 == preset {found=1; next}
-        found && /^$/ {exit}
-        found {print}
-    ' vast.conf)
-    if [ -z "$command_to_run" ]; then
-        echo "Error: Encode preset '$encode' not found in vast.conf."
-        exit 1
-    fi
-    if [ $scenedetect == 1 ]; then
-        eval "$command_to_run$with_sds"
-    elif [ $scenedetect == 0 ]; then
-        eval "$command_to_run$without_sds"
-    else
-        echo "Error: Unsupported scenedetect flag"
-        exit 1
-    fi
+if [[ $filtering_option == "2" ]]; then
+    eval "$encode_option$with_sds_filtering"
+elif [[ $filtering_option == "1" ]]; then
+    eval "$encode_option$with_filtering"
+elif [[ $filtering_option == "0" ]]; then
+    eval "$encode_option$without_sds_filtering"
+else
+    echo "Error: Unsupported scenedetect flag"
+    exit 1
 fi
 
+unset VAST_VIDEO_PATH
+
 ###     Run FFVship to create Metric JSONs and Graphs
+if [[ $metric_option == "1" ]]; then
 FFVship -s "$temp/$noextension-filtered.mkv" -e "$temp/$noextension-encoded.mkv" -m Butteraugli --json "$temp/$noextension-butter.json"
 python plot_butter.py "$temp/$noextension-butter.json" "$working_directory/$noextension-butter.png"
 FFVship -s "$temp/$noextension-filtered.mkv" -e "$temp/$noextension-encoded.mkv" --json "$temp/$noextension-ssimu2.json"
 python plot_ssimu2.py "$temp/$noextension-ssimu2.json" "$working_directory/$noextension-ssimu2.png"
+elif [[ $metric_option == "0" ]]; then
+    true
+else
+    echo "Error: Unsupported metric flag"
+    exit 1
+fi
 
 ###     Mux audio from source video with encoded video
-konsole -e ffmpeg -an -i "$temp$increment" -vn -i "$video_path" \
+if [[ $audio_option == "1" ]]; then
+ffmpeg -an -i "$temp$increment" -vn -i "$video_path" \
     -c:v copy -c:a copy \
     "$working_directory/$increment"
+elif [[ $audio_option == "0" ]]; then
+    true
+else
+    echo "Error: Unsupported audio flag"
+    exit 1
+fi
 
     let batch_counter=batch_counter+1
-done
+}
+
+###     Batch Encoding
+if [[ -n $batch == "1" ]]; then
+    for parameters in ${batch_options[@]}; do
+        batch_conditional
+    done
+else
+    batch_conditional
+fi
 
 ###     Remove temporary folder
 rm -rf $temp
